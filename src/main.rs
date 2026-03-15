@@ -10,6 +10,7 @@ enum Directive {
     Else,
     EndIf,
     None,
+    Version(String),
 }
 
 fn parse_directive(line: &str, search_paths: &[PathBuf]) -> Directive {
@@ -24,9 +25,11 @@ fn parse_directive(line: &str, search_paths: &[PathBuf]) -> Directive {
         Directive::Else
     } else if trimmed == "#endif" {
         Directive::EndIf
+    } else if let Some(rest) = trimmed.strip_prefix("#version") {
+        Directive::Version(rest.trim().to_string())
     } else {
         Directive::None
-    }
+    } 
 }
 
 #[derive(Parser)]
@@ -126,7 +129,7 @@ fn process_file(path: &Path, visited: &mut HashSet<PathBuf>, search_paths: &[Pat
         .chain(search_paths.iter().cloned())
         .collect();
 
-    if line_directives {
+    if line_directives && file_id != 0 {
         output.push_str(&format!("#line 1 {} // {}\n", file_id, canonical.display()));
     }
 
@@ -169,6 +172,18 @@ fn process_file(path: &Path, visited: &mut HashSet<PathBuf>, search_paths: &[Pat
                 }
                 emit_stack.pop();
                 emitting = emit_stack.iter().all(|&b| b);
+            }
+            Directive::Version(v) => {
+                if file_id != 0 {
+                    anyhow::bail!("#version directive found in included file {}, it must only appear in the root file", canonical.display());
+                }
+                if line_number != 1 {
+                    anyhow::bail!("#version directive must be the first line in {}", canonical.display());
+                }
+                output.push_str(&format!("#version {}\n", v));
+                if line_directives {
+                    output.push_str(&format!("#line 2 {} // {}\n", file_id, canonical.display()));
+                }
             }
             Directive::None => { 
                 if !emitting { 
