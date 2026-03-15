@@ -82,7 +82,18 @@ pub fn preprocess(path: &Path, search_paths: &[PathBuf], defines: Vec<String>, i
     let mut visited = HashSet::new();
     let mut output = String::new();
 
-    // Emit defines once, at the very top
+    // Peek at the first line to check for #version
+    let source = std::fs::read_to_string(path)?;
+    let first_line = source.lines().next().unwrap_or("");
+    if let Some(rest) = first_line.trim().strip_prefix("#version") {
+        output.push_str(&format!("#version {}\n", rest.trim()));
+    }
+
+    if line_directives {
+        output.push_str(&format!("#line 1 0 // {}\n", path.display()));
+    }
+
+    // Emit defines
     for define in &defines {
         output.push_str(&format_define(define));
     }
@@ -129,10 +140,6 @@ fn process_file(path: &Path, visited: &mut HashSet<PathBuf>, search_paths: &[Pat
         .chain(search_paths.iter().cloned())
         .collect();
 
-    if line_directives && file_id != 0 {
-        output.push_str(&format!("#line 1 {} // {}\n", file_id, canonical.display()));
-    }
-
     let mut emit_stack: Vec<bool> = vec![true];
     let mut line_number = 1usize;
     let mut emitting = true;
@@ -173,16 +180,9 @@ fn process_file(path: &Path, visited: &mut HashSet<PathBuf>, search_paths: &[Pat
                 emit_stack.pop();
                 emitting = emit_stack.iter().all(|&b| b);
             }
-            Directive::Version(v) => {
+            Directive::Version(_v) => {
                 if file_id != 0 {
-                    anyhow::bail!("#version directive found in included file {}, it must only appear in the root file", canonical.display());
-                }
-                if line_number != 1 {
-                    anyhow::bail!("#version directive must be the first line in {}", canonical.display());
-                }
-                output.push_str(&format!("#version {}\n", v));
-                if line_directives {
-                    output.push_str(&format!("#line 2 {} // {}\n", file_id, canonical.display()));
+                    anyhow::bail!("#version directive must be in the main file ({}), found in {}", visited.iter().next().unwrap().display(), canonical.display());
                 }
             }
             Directive::None => { 
