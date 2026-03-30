@@ -13,7 +13,7 @@ anyhow = "1"
 thiserror = "1"
 logos = "0.14"
 walkdir = "2"
-naga = { version = "22", features = [
+naga = { version = "28", features = [
     "wgsl-in",
     "wgsl-out",
     "glsl-in",
