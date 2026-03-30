@@ -32,9 +32,17 @@ fn parse_directive(line: &str, search_paths: &[PathBuf]) -> Directive {
     } 
 }
 
+#[derive(clap::ValueEnum, Clone)]
+#[derive(PartialEq)]
+enum OutputType {
+    Glsl,
+    Spirv,
+    Same,
+}
+
 #[derive(Parser)]
 #[command(name = "ShaderPreprocessor", about = "Shader preprocessor for GLSL and WGSL")]
-struct Args {
+struct ShaderArgs {
     input: std::path::PathBuf,
 
     #[arg(short = 'I', long)]
@@ -51,11 +59,26 @@ struct Args {
 
     #[arg(short = 'd', long = "internal-define", help = "Define a preprocessor symbol (KEY or KEY=VALUE) for use in preprocessing only, not emitted in output)")]
     internal_defines: Vec<String>,
+
+    #[arg(short = 't', long = "output-type", default_value = "same", help = "Output type: glsl, spirv, or same (default)")]
+    output_type: OutputType,
 }
 
 fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let args = ShaderArgs::parse();
     let result = preprocess(&args.input, &args.include, args.defines, args.internal_defines, args.line_directives)?;
+    let input_extension = args.input.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let output_extension = match args.output_type {
+        OutputType::Glsl => "glsl",
+        OutputType::Spirv => "spv",
+        OutputType::Same => args.input.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("wgsl"),
+    };
 
     let input_parent_dir = args.input.parent();
     let output_file = match args.output {
@@ -67,14 +90,111 @@ fn main() -> anyhow::Result<()> {
             },
         None => {
             let stem = args.input.file_stem().unwrap_or_default();
-            let ext = args.input.extension().unwrap_or_default();
-            let filename = format!("{}_out.{}", stem.to_string_lossy(), ext.to_string_lossy());
+            let filename = format!("{}_out.{}", stem.to_string_lossy(), output_extension);
 
             args.input.parent().unwrap_or(Path::new(".")).join(filename)
         }
     };
 
-    std::fs::write(output_file, result)?;
+    if args.output_type == OutputType::Same {
+        std::fs::write(output_file, &result)?; // Minify?
+        return Ok(())
+    }
+
+    let module = match input_extension.as_str() {
+        "wgsl" => {
+            naga::front::wgsl::parse_str(&result)?
+        }
+        "glsl" | "comp" => {
+            // In Naga 0.20+, it's called Frontend, not Parser
+            let mut frontend = naga::front::glsl::Frontend::default();
+
+            let options = naga::front::glsl::Options {
+                stage: naga::ShaderStage::Compute,
+                // Naga 0.20 uses its own internal FastHashMap, 
+                // not the one from std (which doesn't actually exist in std!)
+                defines: naga::FastHashMap::default(), 
+            };
+        
+            frontend.parse(&options, &result)?
+        }
+        other => {
+            anyhow::bail!("Unsupported input file extension: {}", other);
+        }
+    };
+    
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    ).validate(&module)?;
+
+    // use the first entry point found in the module
+    let entry_point = module.entry_points
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("No entry points found in shader"))?;
+    
+    let shader_stage = entry_point.stage;
+    let entry_point_name = entry_point.name.clone();
+    
+    let final_output: Vec<u8> = match args.output_type {
+        OutputType::Glsl => {
+            let mut glsl_output = String::new();
+            let naga_options = naga::back::glsl::Options {
+                version: naga::back::glsl::Version::Desktop(430),
+                ..Default::default()
+            };
+            let naga_pipeline_options = naga::back::glsl::PipelineOptions {
+                shader_stage,
+                entry_point: entry_point_name,
+                multiview: None,
+            };
+
+            let mut writer = naga::back::glsl::Writer::new(
+                &mut glsl_output,
+                &module,
+                &info,
+                &naga_options,
+                &naga_pipeline_options,
+                naga::proc::BoundsCheckPolicies::default(),
+            )?;
+            
+            writer.write()?;
+            
+            glsl_output.into_bytes()
+        },
+        OutputType::Spirv => {
+            let mut spirv_output = Vec::<u32>::new();
+            let naga_options = naga::back::spv::Options {
+                lang_version: (1, 0),
+                ..Default::default()
+            };
+            let naga_pipeline_options = naga::back::spv::PipelineOptions {
+                shader_stage,
+                entry_point: entry_point_name,
+            };
+            
+            let mut writer = naga::back::spv::Writer::new(&naga_options)?;
+            writer.write(
+                &module,
+                &info,
+                Some(&naga_pipeline_options),
+                &None, 
+                &mut spirv_output,
+            )?;
+
+            // Convert the Vec<u32> words into a flat Vec<u8> byte buffer
+            spirv_output
+                .into_iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect()
+        },
+        OutputType::Same => {
+            // Converts the preprocessed String result into bytes
+            result.into_bytes()
+        }
+    };
+
+    std::fs::write(output_file, final_output)?;
     Ok(())
 }
 

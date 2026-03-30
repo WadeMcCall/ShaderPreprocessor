@@ -13,3 +13,10 @@ anyhow = "1"
 thiserror = "1"
 logos = "0.14"
 walkdir = "2"
+naga = { version = "0.20", features = [
+    "wgsl-in",
+    "wgsl-out",
+    "glsl-in",
+    "glsl-out",
+    "spv-out",
+] }
